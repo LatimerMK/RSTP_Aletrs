@@ -9,13 +9,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ==== Налаштування ====
 RTSP_URL = os.getenv("RTSP_URL")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Основна папка ресурсів
 RESOURCES_FOLDER = "RESOURCES"
@@ -26,7 +24,7 @@ if not os.path.exists(RESOURCES_FOLDER):
 RESTART_INTERVAL = 60 * 60  # Періодичний рестарт кожну годину
 RETRY_DELAY = 5              # Затримка перед повторним стартом після збою (сек)
 # Мінімальний рівень руху (чим менше число – тим чутливіше)
-MOTION_THRESHOLD = 2
+MOTION_THRESHOLD = 500
 MIN_BRIGHTNESS = 30       # мінімальна середня яскравість кадру
 MIN_CONTOUR_AREA = 50     # мінімальна площа контуру для врахування руху
 # Розмір для 16:9 (FullHD)
