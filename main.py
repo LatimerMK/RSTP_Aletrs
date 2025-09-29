@@ -242,8 +242,8 @@ def main():
     logging.info("🛑 Потік закрито")
 
 if __name__ == "__main__":
-
     #ROI = select_roi(RTSP_URL)
+
     logging.info("🚀 Запуск скрипта детекції руху")
 
     while True:
