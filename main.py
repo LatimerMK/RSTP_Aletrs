@@ -281,7 +281,7 @@ if __name__ == "__main__":
             main()
         except KeyboardInterrupt:
             logging.info("🔹 Отримано SIGINT — вихід")
-            #break
+            break
         except Exception as e:
             logging.exception(f"❌ Виникла невідома помилка: {e}")
             logging.info(f"⏳ Перезапуск через {RETRY_DELAY} сек...")
