@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# main.py — RTSP motion alert with centroid-center trigger, dynamic sensitivity, monthly logs and photo archive
+
 import cv2
 import numpy as np
 import requests
@@ -9,39 +12,37 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
-# ==== Налаштування ====
+# ==== ENV / CONFIG ====
 RTSP_URL = os.getenv("RTSP_URL")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Основна папка ресурсів
+# ==== Folders ====
 RESOURCES_FOLDER = "RESOURCES"
-if not os.path.exists(RESOURCES_FOLDER):
-    os.makedirs(RESOURCES_FOLDER)
+os.makedirs(RESOURCES_FOLDER, exist_ok=True)
 
-# ==== Налаштування  ====
-RESTART_INTERVAL = 60 * 60  # Періодичний рестарт кожну годину
-RETRY_DELAY = 5              # Затримка перед повторним стартом після збою (сек)
-# Мінімальний рівень руху (чим менше число – тим чутливіше)
-MOTION_THRESHOLD = 500
-MIN_BRIGHTNESS = 30       # мінімальна середня яскравість кадру
-MIN_CONTOUR_AREA = 50     # мінімальна площа контуру для врахування руху
-# Розмір для 16:9 (FullHD)
-TARGET_SIZE = (1920, 1080)
-# ROI координати (x, y, w, h) - під себе
-ROI = (654, 536, 266, 172)
+# ==== Runtime settings ====
+RESTART_INTERVAL = 60 * 60      # періодичний рестарт (сек)
+RETRY_DELAY = 5                 # затримка перед перезапуском при помилці (сек)
 
-roi_coords = []
+# Motion params (tweak these)
+MOTION_THRESHOLD = 500          # базовий поріг (сума площі контурів)
+MIN_BRIGHTNESS = 30             # мінімальна середня яскравість кадру (якщо нижче — вважаємо темно)
+MIN_CONTOUR_AREA = 50           # мін. площа одного контуру щоб враховувати його
+TARGET_SIZE = (1920, 1080)      # розмір збережених фото
+ROI = (654, 536, 266, 172)      # (x, y, w, h)
+MOTION_DELAY_FRAMES = 10         # кадри, які об'єкт має бути в центрі перед трігером
+ALERT_INTERVAL = 5.0            # мін. інтервал між алертами для того самого об'єкта (сек)
+TRIGGER_MEMORY_SECONDS = 8.0    # скільки пам'ятаємо останні тригери (щоб розрізняти авто)
+MIN_DISTANCE_FOR_DIFFERENT = 100 # px - мін. дистанція центроїда щоб вважати об'єкт іншим
+BRIGHTNESS_TRIGGER_DELTA = 40   # якщо яскравість стрибнула більше за це значення -> миттєвий тригер
+DARK_DYNAMIC_FACTOR = 2.5       # наскільки підвищувати поріг у темряві (експериментально)
 
-# ==== Налаштування логів ====
+# ==== Logging (monthly folder, UTF-8) ====
 now = datetime.now()
-month_log_folder = os.path.join(RESOURCES_FOLDER, now.strftime("%Y-%m"))  # папка місяця для логів
-if not os.path.exists(month_log_folder):
-    os.makedirs(month_log_folder)
-
-today_str = now.strftime("%Y-%m-%d")
-LOG_FILE = os.path.join(month_log_folder, f"{today_str}.log")
+month_log_folder = os.path.join(RESOURCES_FOLDER, now.strftime("%Y-%m"))
+os.makedirs(month_log_folder, exist_ok=True)
+LOG_FILE = os.path.join(month_log_folder, f"{now.strftime('%Y-%m-%d')}.log")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,123 +53,43 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-
 logging.info(f"✅ Логування запущено, файл: {LOG_FILE}")
 
-
-
-def select_roi(RTSP_URL):
-    cap = cv2.VideoCapture(RTSP_URL)
-    ret, frame = cap.read()
-    cap.release()
-
-    if not ret:
-        print("❌ Не вдалося отримати кадр")
-        return None
-
-    clone = frame.copy()
-
-    def mouse_callback(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            if len(param) < 2:
-                param.append((x, y))
-
-    cv2.namedWindow("Frame")
-    cv2.setMouseCallback("Frame", mouse_callback, roi_coords)
-
-    print("🖱 ЛКМ — точка, Backspace — видалити, Enter — підтвердити, ESC — скасувати")
-
-    while True:
-        display = clone.copy()
-        for pt in roi_coords:
-            cv2.circle(display, pt, 5, (0, 0, 255), -1)
-
-        if len(roi_coords) == 2:
-            x1, y1 = roi_coords[0]
-            x2, y2 = roi_coords[1]
-            cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-        cv2.imshow("Frame", display)
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == 13:  # Enter
-            if len(roi_coords) == 2:
-                break
-            else:
-                print("⚠️ Виберіть дві точки перед підтвердженням!")
-        elif key == 8:  # Backspace
-            if roi_coords:
-                roi_coords.pop()
-        elif key == 27:  # ESC
-            roi_coords.clear()
-            break
-
-    cv2.destroyAllWindows()
-
-    if len(roi_coords) == 2:
-        (x1, y1), (x2, y2) = roi_coords
-        x, y = min(x1, x2), min(y1, y2)
-        w, h = abs(x2 - x1), abs(y2 - y1)
-        print(f"✅ ROI = ({x}, {y}, {w}, {h})")
-        return (x, y, w, h)
-    else:
-        print("❌ ROI не вибрано")
-        return None
-
+# ==== Helpers ====
 def send_photo(photo_path):
-    """Відправка фото в Telegram та збереження у папку ресурси/місяць/день"""
-    # Надсилаємо фото
-    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-    with open(photo_path, "rb") as f:
-        files = {"photo": f}
-        data = {"chat_id": CHAT_ID}
-        requests.post(url, files=files, data=data)
+    """Відправка фото в Telegram та збереження у папку ресурси/місяць_photo/день"""
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+        with open(photo_path, "rb") as f:
+            files = {"photo": f}
+            data = {"chat_id": CHAT_ID}
+            resp = requests.post(url, files=files, data=data, timeout=15)
+        if resp.status_code != 200:
+            logging.warning(f"Telegram returned status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        logging.exception(f"Помилка при відправці фото у Telegram: {e}")
 
     now = datetime.now()
-    # Папка місяця для фото
     month_folder = os.path.join(RESOURCES_FOLDER, now.strftime("%Y-%m") + "_photo")
-    if not os.path.exists(month_folder):
-        os.makedirs(month_folder)
-
-    # Папка дня всередині місячної
+    os.makedirs(month_folder, exist_ok=True)
     day_folder = os.path.join(month_folder, now.strftime("%Y-%m-%d"))
-    if not os.path.exists(day_folder):
-        os.makedirs(day_folder)
+    os.makedirs(day_folder, exist_ok=True)
 
-    # Формуємо ім'я файлу за датою та часом
     timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
     new_filename = f"{timestamp}.jpg"
     new_path = os.path.join(day_folder, new_filename)
 
-    # Переміщаємо файл
-    os.rename(photo_path, new_path)
+    try:
+        os.replace(photo_path, new_path)
+    except Exception:
+        os.rename(photo_path, new_path)
     logging.info(f"📸 Фото збережено: {new_path}")
 
-def stretch_to_16_9(img, target_size=TARGET_SIZE, contrast=1.2, brightness=10, denoise_strength=2):
-    """
-    Покращує картинку:
-    1. Масштабування до 16:9
-    2. Підвищення різкості
-    3. Зменшення шуму
-    4. Корекція контрасту та яскравості
-    """
-    # Масштабування з високоякісною інтерполяцією
-    stretched = cv2.resize(img, target_size, interpolation=cv2.INTER_LANCZOS4)
+def stretch_to_16_9(img, target_size=TARGET_SIZE):
+    """Масштабування 16:9"""
+    return cv2.resize(img, target_size, interpolation=cv2.INTER_LANCZOS4)
 
-    # Підвищення різкості
-    kernel = np.array([[0, -1, 0],
-                       [-1, 5, -1],
-                       [0, -1, 0]])
-    sharpened = cv2.filter2D(stretched, -1, kernel)
-    # Зменшення шуму
-    denoised = cv2.fastNlMeansDenoisingColored(sharpened, None, denoise_strength, denoise_strength, 7, 21)
-
-    # Корекція контрасту та яскравості
-    enhanced = cv2.convertScaleAbs(denoised, alpha=contrast, beta=brightness)
-
-    return enhanced
-
-
+# ==== Main detection logic ====
 def main():
     global ROI
     global MOTION_THRESHOLD
@@ -187,8 +108,10 @@ def main():
     prev_roi = cv2.cvtColor(prev_frame[y:y+h, x:x+w], cv2.COLOR_BGR2GRAY)
 
     last_alert_time = 0
-    ALERT_INTERVAL = 30  # секунд, мінімальний інтервал між повідомленнями
-    is_dark = False  # глобальна або зовнішня змінна перед циклом
+    is_dark = False
+    trigger_memory = []
+
+    recent_frames = []
 
     while True:
         ret, frame = cap.read()
@@ -201,63 +124,76 @@ def main():
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         avg_brightness = np.mean(gray)
 
+        # Динамічна чутливість при темряві
+        motion_threshold_dynamic = MOTION_THRESHOLD
         if avg_brightness < MIN_BRIGHTNESS:
-            if not is_dark:  # лог тільки при переході в темряву
-                logging.info("🌙 Дуже темно, дрібні рухи ігноруємо")
-                is_dark = True
-            prev_roi = gray
-            continue
+            motion_threshold_dynamic *= DARK_DYNAMIC_FACTOR
+
+        # Миттєвий тригер при спалаху яскравості
+        brightness_jump = np.mean(gray) - np.mean(prev_roi)
+        if brightness_jump > BRIGHTNESS_TRIGGER_DELTA:
+            motion_detected = True
         else:
-            if is_dark:  # лог переходу з темряви в світло
-                logging.info("💡 Кадр достатньо освітлений, обробка руху")
-                is_dark = False
+            # Різниця кадрів
+            diff = cv2.absdiff(prev_roi, gray)
+            _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            motion_area = sum(cv2.contourArea(c) for c in contours if cv2.contourArea(c) > MIN_CONTOUR_AREA)
+            motion_detected = motion_area > motion_threshold_dynamic
 
-        # Різниця кадрів
-        diff = cv2.absdiff(prev_roi, gray)
-        _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+            motion_detected = False
+            centroids_in_frame = []
 
-        # Фільтруємо дрібні об’єкти
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        motion_area = sum(cv2.contourArea(c) for c in contours if cv2.contourArea(c) > MIN_CONTOUR_AREA)
+            for c in contours:
+                if cv2.contourArea(c) < MIN_CONTOUR_AREA:
+                    continue
+                M = cv2.moments(c)
+                if M["m00"] == 0:
+                    continue
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                centroids_in_frame.append((cx, cy))
 
-        logging.debug(f"ℹ️ Рівень руху (сума площ): {motion_area}, яскравість: {avg_brightness}")
+                # Центральна зона ROI
+                if 0.25 * w < cx < 0.75 * w and 0.25 * h < cy < 0.75 * h:
+                    # Перевіряємо історію тригерів
+                    now_time = time.time()
+                    trigger_memory = [t for t in trigger_memory if now_time - t[1] < TRIGGER_MEMORY_SECONDS]
+                    new_trigger = True
+                    for mem_centroid, ts in trigger_memory:
+                        dist = np.linalg.norm(np.array([cx, cy]) - np.array(mem_centroid))
+                        if dist < MIN_DISTANCE_FOR_DIFFERENT:
+                            new_trigger = False
+                            break
 
-        if motion_area > MOTION_THRESHOLD:
-            now = time.time()
-            if now - last_alert_time >= ALERT_INTERVAL:
-                stretched = stretch_to_16_9(frame)
-                filename = "alert.jpg"
-                cv2.imwrite(filename, stretched, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-                send_photo(filename)
-                logging.info(f"⚠️ Рух зафіксовано! Фото відправлено")
-                last_alert_time = now
-            else:
-                logging.info("⚠️ Рух зафіксовано, але повідомлення відправляти рано (інтервал)")
+                    if new_trigger:
+                        motion_detected = True
+                        # Відправка фото
+                        if now_time - last_alert_time >= ALERT_INTERVAL:
+                            stretched = stretch_to_16_9(frame)
+                            filename = "alert.jpg"
+                            cv2.imwrite(filename, stretched, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                            send_photo(filename)
+                            last_alert_time = now_time
+                            trigger_memory.append(((cx, cy), now_time))
+                            logging.info(f"⚠️ Рух зафіксовано! Фото відправлено")
 
         prev_roi = gray
 
     cap.release()
     logging.info("🛑 Потік закрито")
 
+# ==== Run wrapper with auto-restart ====
 if __name__ == "__main__":
-    #ROI = select_roi(RTSP_URL)
-
     logging.info("🚀 Запуск скрипта детекції руху")
-
     while True:
         start_time = time.time()
         try:
-            # Якщо хочеш обирати ROI через GUI:
-            # ROI = select_roi(RTSP_URL)
-            main()  # запускаємо основний цикл
+            main()
+        except KeyboardInterrupt:
+            logging.info("🔹 Отримано SIGINT — вихід")
+            #break
         except Exception as e:
-            logging.error(f"❌ Виникла помилка: {e}")
-            logging.info(f"⏳ Перезапуск через {RETRY_DELAY} секунд...")
+            logging.exception(f"❌ Виникла невідома помилка: {e}")
+            logging.info(f"⏳ Перезапуск через {RETRY_DELAY} сек...")
             time.sleep(RETRY_DELAY)
-
-        # Перевірка на періодичний рестарт
-        elapsed = time.time() - start_time
-        if elapsed < RESTART_INTERVAL:
-            sleep_time = RESTART_INTERVAL - elapsed
-            logging.info(f"⏳ Періодичний рестарт через {int(sleep_time)} секунд")
-            time.sleep(sleep_time)
