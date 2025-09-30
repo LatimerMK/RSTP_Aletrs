@@ -22,22 +22,22 @@ RESOURCES_FOLDER = "RESOURCES"
 os.makedirs(RESOURCES_FOLDER, exist_ok=True)
 
 # ==== Runtime settings ====
-RESTART_INTERVAL = 60 * 60      # періодичний рестарт (сек)
-RETRY_DELAY = 5                 # затримка перед перезапуском при помилці (сек)
+RESTART_INTERVAL = 60 * 60          # періодичний рестарт (сек)
+RETRY_DELAY = 5                     # затримка перед перезапуском при помилці (сек)
 
 # Motion params (tweak these)
-MOTION_THRESHOLD = 500          # базовий поріг (сума площі контурів)
-MIN_BRIGHTNESS = 30             # мінімальна середня яскравість кадру (якщо нижче — вважаємо темно)
-MIN_CONTOUR_AREA = 50           # мін. площа одного контуру щоб враховувати його
-TARGET_SIZE = (2560, 1440)      # розмір збережених фото
-ROI = (737, 534, 175, 146)      # (x, y, w, h) (654, 536, 266, 172)
-MOTION_DELAY_FRAMES = 10         # кадри, які об'єкт має бути в центрі перед трігером
-ALERT_INTERVAL = 5.0            # мін. інтервал між алертами для того самого об'єкта (сек)
-TRIGGER_MEMORY_SECONDS = 8.0    # скільки пам'ятаємо останні тригери (щоб розрізняти авто)
-MIN_DISTANCE_FOR_DIFFERENT = 100 # px - мін. дистанція центроїда щоб вважати об'єкт іншим
-BRIGHTNESS_TRIGGER_DELTA = 40   # якщо яскравість стрибнула більше за це значення -> миттєвий тригер
-DARK_DYNAMIC_FACTOR = 2.5       # наскільки підвищувати поріг у темряві (експериментально)
-JPEG_QUALITY = 75               # 95 / 85 / 75  - 1.2 / 0.5 / 0.3 mb
+MOTION_THRESHOLD = 500              # базовий поріг (сума площі контурів)
+MIN_BRIGHTNESS = 30                 # мінімальна середня яскравість кадру (якщо нижче — вважаємо темно)
+MIN_CONTOUR_AREA = 50               # мін. площа одного контуру щоб враховувати його
+TARGET_SIZE = (2560, 1440)          # розмір збережених фото
+ROI = (737, 534, 175, 146)          # (x, y, w, h) (654, 536, 266, 172)
+MOTION_DELAY_FRAMES = 10            # кадри, які об'єкт має бути в центрі перед трігером
+ALERT_INTERVAL = 5.0                # мін. інтервал між алертами для того самого об'єкта (сек)
+TRIGGER_MEMORY_SECONDS = 8.0        # скільки пам'ятаємо останні тригери (щоб розрізняти авто)
+MIN_DISTANCE_FOR_DIFFERENT = 100    # px - мін. дистанція центроїда щоб вважати об'єкт іншим
+BRIGHTNESS_TRIGGER_DELTA = 40       # якщо яскравість стрибнула більше за це значення -> миттєвий тригер
+DARK_DYNAMIC_FACTOR = 25            # наскільки підвищувати поріг у темряві (експериментально)
+JPEG_QUALITY = 75                   # 95 / 85 / 75  - 1.2 / 0.5 / 0.3 mb
 
 # ==== Logging (monthly folder, UTF-8) ====
 now = datetime.now()
@@ -209,61 +209,66 @@ def main():
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         avg_brightness = np.mean(gray)
 
+
         # Динамічна чутливість при темряві
         motion_threshold_dynamic = MOTION_THRESHOLD
+
         if avg_brightness < MIN_BRIGHTNESS:
             motion_threshold_dynamic *= DARK_DYNAMIC_FACTOR
 
         # Миттєвий тригер при спалаху яскравості
         brightness_jump = np.mean(gray) - np.mean(prev_roi)
+        motion_detected = False
         if brightness_jump > BRIGHTNESS_TRIGGER_DELTA:
             motion_detected = True
+            logging.info("brightness_jump > BRIGHTNESS_TRIGGER_DELTA:")
         else:
             # Різниця кадрів
             diff = cv2.absdiff(prev_roi, gray)
             _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
             contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             motion_area = sum(cv2.contourArea(c) for c in contours if cv2.contourArea(c) > MIN_CONTOUR_AREA)
+            #if motion_area > 1:
+            #    print(motion_area)
             motion_detected = motion_area > motion_threshold_dynamic
 
-            motion_detected = False
             centroids_in_frame = []
+            if motion_detected:
+                for c in contours:
+                    if cv2.contourArea(c) < MIN_CONTOUR_AREA:
+                        continue
+                    M = cv2.moments(c)
+                    if M["m00"] == 0:
+                        continue
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    centroids_in_frame.append((cx, cy))
 
-            for c in contours:
-                if cv2.contourArea(c) < MIN_CONTOUR_AREA:
-                    continue
-                M = cv2.moments(c)
-                if M["m00"] == 0:
-                    continue
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                centroids_in_frame.append((cx, cy))
+                    # Центральна зона ROI
+                    if 0.25 * w < cx < 0.75 * w and 0.25 * h < cy < 0.75 * h:
+                    #if 0.25 * w < cx < 0.75 * w and 0.1 * h < cy < 0.9 * h:
+                    # рух всередині центральної горизонтальної та розширеної вертикальної зони
+                        # Перевіряємо історію тригерів
+                        now_time = time.time()
+                        trigger_memory = [t for t in trigger_memory if now_time - t[1] < TRIGGER_MEMORY_SECONDS]
+                        new_trigger = True
+                        for mem_centroid, ts in trigger_memory:
+                            dist = np.linalg.norm(np.array([cx, cy]) - np.array(mem_centroid))
+                            if dist < MIN_DISTANCE_FOR_DIFFERENT:
+                                new_trigger = False
+                                break
 
-                # Центральна зона ROI
-                if 0.25 * w < cx < 0.75 * w and 0.25 * h < cy < 0.75 * h:
-                #if 0.25 * w < cx < 0.75 * w and 0.1 * h < cy < 0.9 * h:
-                # рух всередині центральної горизонтальної та розширеної вертикальної зони
-                    # Перевіряємо історію тригерів
-                    now_time = time.time()
-                    trigger_memory = [t for t in trigger_memory if now_time - t[1] < TRIGGER_MEMORY_SECONDS]
-                    new_trigger = True
-                    for mem_centroid, ts in trigger_memory:
-                        dist = np.linalg.norm(np.array([cx, cy]) - np.array(mem_centroid))
-                        if dist < MIN_DISTANCE_FOR_DIFFERENT:
-                            new_trigger = False
-                            break
-
-                    if new_trigger:
-                        motion_detected = True
-                        # Відправка фото
-                        if now_time - last_alert_time >= ALERT_INTERVAL:
-                            stretched = stretch_to_16_9(frame)
-                            filename = "alert.jpg"
-                            cv2.imwrite(filename, stretched, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-                            send_photo(filename)
-                            last_alert_time = now_time
-                            trigger_memory.append(((cx, cy), now_time))
-                            logging.info(f"⚠️ Рух зафіксовано! Фото відправлено")
+                        if new_trigger:
+                            #motion_detected = True
+                            # Відправка фото
+                            if now_time - last_alert_time >= ALERT_INTERVAL:
+                                stretched = stretch_to_16_9(frame)
+                                filename = "alert.jpg"
+                                cv2.imwrite(filename, stretched, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+                                send_photo(filename)
+                                last_alert_time = now_time
+                                trigger_memory.append(((cx, cy), now_time))
+                                logging.info(f"⚠️ Рух зафіксовано! Фото відправлено")
 
         prev_roi = gray
 
