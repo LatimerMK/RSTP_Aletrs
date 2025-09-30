@@ -273,7 +273,7 @@ def main():
 
 # ==== Run wrapper with auto-restart ====
 if __name__ == "__main__":
-    select_roi(RTSP_URL)
+    #select_roi(RTSP_URL)
     logging.info("🚀 Запуск скрипта детекції руху")
     while True:
         start_time = time.time()
