@@ -37,6 +37,7 @@ TRIGGER_MEMORY_SECONDS = 8.0        # скільки пам'ятаємо ост�
 MIN_DISTANCE_FOR_DIFFERENT = 100    # px - мін. дистанція центроїда щоб вважати об'єкт іншим
 BRIGHTNESS_TRIGGER_DELTA = 40       # якщо яскравість стрибнула більше за це значення -> миттєвий тригер
 DARK_DYNAMIC_FACTOR = 25            # наскільки підвищувати поріг у темряві (експериментально)
+GRAY_DYNAMIC_FACTOR = 3             # наскільки підвищувати поріг при чб картинці (експериментально)
 JPEG_QUALITY = 75                   # 95 / 85 / 75  - 1.2 / 0.5 / 0.3 mb
 
 # ==== Logging (monthly folder, UTF-8) ====
@@ -167,6 +168,8 @@ def main():
     global MOTION_THRESHOLD
     global MIN_BRIGHTNESS
     global JPEG_QUALITY
+    global GRAY_DYNAMIC_FACTOR
+    global DARK_DYNAMIC_FACTOR
 
     logging.info("🔄 Підключення до RTSP потоку...")
     cap = cv2.VideoCapture(RTSP_URL)
@@ -209,19 +212,45 @@ def main():
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         avg_brightness = np.mean(gray)
 
+        # --- Перевірка на "монохромність"
+        # Розділяємо канали
+        b, g, r = cv2.split(roi.astype("float"))
 
-        # Динамічна чутливість при темряві
+        # Вираховуємо середні відмінності між каналами
+        diff_rg = np.mean(np.abs(r - g))
+        diff_gb = np.mean(np.abs(g - b))
+        diff_rb = np.mean(np.abs(r - b))
+
+        avg_color_diff = (diff_rg + diff_gb + diff_rb) / 3
+
+        # Якщо різниця дуже мала (наприклад < 2..5) — кадр майже ч/б
+        IS_GRAYSCALE = avg_color_diff < 3.0
+
         motion_threshold_dynamic = MOTION_THRESHOLD
 
+        # Динамічна чутливість при чб картинці
+        if IS_GRAYSCALE:
+            motion_threshold_dynamic *= GRAY_DYNAMIC_FACTOR  # додатково знижуємо чутливість
+
+        # Динамічна чутливість при темряві
         if avg_brightness < MIN_BRIGHTNESS:
+            motion_threshold_dynamic = MOTION_THRESHOLD
             motion_threshold_dynamic *= DARK_DYNAMIC_FACTOR
 
         # Миттєвий тригер при спалаху яскравості
         brightness_jump = np.mean(gray) - np.mean(prev_roi)
         motion_detected = False
         if brightness_jump > BRIGHTNESS_TRIGGER_DELTA:
-            motion_detected = True
+            # motion_detected = True
             logging.info("brightness_jump > BRIGHTNESS_TRIGGER_DELTA:")
+            stretched = stretch_to_16_9(frame)
+            filename = "alert.jpg"
+            cv2.imwrite(filename, stretched, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+            send_photo(filename)
+            last_alert_time = now_time
+            trigger_memory.append(((cx, cy), now_time))
+            logging.info(f"⚠️ Рух зафіксовано! Фото відправлено > brightness_jump")
+
         else:
             # Різниця кадрів
             diff = cv2.absdiff(prev_roi, gray)
@@ -231,9 +260,9 @@ def main():
             #if motion_area > 1:
             #    print(motion_area)
             motion_detected = motion_area > motion_threshold_dynamic
-
-            centroids_in_frame = []
+            # --- Обробка motion_detected  ---
             if motion_detected:
+                centroids_in_frame = []
                 for c in contours:
                     if cv2.contourArea(c) < MIN_CONTOUR_AREA:
                         continue
@@ -246,8 +275,7 @@ def main():
 
                     # Центральна зона ROI
                     if 0.25 * w < cx < 0.75 * w and 0.25 * h < cy < 0.75 * h:
-                    #if 0.25 * w < cx < 0.75 * w and 0.1 * h < cy < 0.9 * h:
-                    # рух всередині центральної горизонтальної та розширеної вертикальної зони
+                    # рух всередині центральної горизонтальної та вертикальної зони
                         # Перевіряємо історію тригерів
                         now_time = time.time()
                         trigger_memory = [t for t in trigger_memory if now_time - t[1] < TRIGGER_MEMORY_SECONDS]
