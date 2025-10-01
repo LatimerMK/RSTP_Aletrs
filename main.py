@@ -38,7 +38,7 @@ MIN_DISTANCE_FOR_DIFFERENT = 100    # px - мін. дистанція центр
 BRIGHTNESS_TRIGGER_DELTA = 40       # якщо яскравість стрибнула більше за це значення -> миттєвий тригер
 DARK_DYNAMIC_FACTOR = 25            # наскільки підвищувати поріг у темряві (експериментально)
 GRAY_DYNAMIC_FACTOR = 3             # наскільки підвищувати поріг при чб картинці (експериментально)
-JPEG_QUALITY = 75                   # 95 / 85 / 75  - 1.2 / 0.5 / 0.3 mb
+JPEG_QUALITY = 80                   # 95 / 85 / 75  - 1.2 / 0.5 / 0.3 mb
 
 # ==== Logging (monthly folder, UTF-8) ====
 now = datetime.now()
